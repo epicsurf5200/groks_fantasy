@@ -1,0 +1,13 @@
+espn:
+  league_id: your_league_id_here  # e.g., 12345678
+  season: 2025
+  swid: "{your-swid-guid}"       # e.g., {12345678-ABCD-1234-ABCD-1234567890AB}
+  espn_s2: your_espn_s2_cookie   # Long alphanumeric string
+
+grok:
+  api_key: your_xai_api_key_here # From xAI API Console
+  model: grok-beta              # Or grok-3-mini-beta, check xAI docs for available models
+
+settings:
+  scoring_type: standard         # Options: standard, ppr, half_ppr
+  roster_update_interval: 3600   # Seconds for auto-refresh (e.g., hourly)

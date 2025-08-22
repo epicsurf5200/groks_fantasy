@@ -1,29 +1,20 @@
-if [ ! -d "groks_fantasy_env" ]; then
+#!/bin/bash
+set -e
+VENV_DIR="venv_groks_fantasy"
+if [ ! -d "$VENV_DIR" ]; then
     echo "Creating virtual environment..."
-    if python3 -m venv groks_fantasy_env; then
-        echo "Virtual environment created."
-    else
-        echo "Failed to create virtual environment."
-        return 1
-    fi
+    python3 -m venv $VENV_DIR
+else
+    echo "Virtual environment already exists."
 fi
-
-echo "Activating virtual environment..."
-if ! source groks_fantasy_env/bin/activate; then
-    echo "Failed to activate virtual environment."
-    return 1
+source $VENV_DIR/bin/activate
+echo "Installing dependencies from packages folder..."
+if [ -d "packages" ] && [ "$(ls -A packages/*.whl 2>/dev/null)" ]; then
+    pip install packages/*.whl
+else
+    echo "Error: No .whl files found in packages folder."
+    exit 1
 fi
-
-echo "Installing pip wheels..."
-if ! pip3 install --no-index --no-deps --force-reinstall packages/wheelhouse/*.whl; then
-    echo "Failed to install pip wheels."
-    return 1
-fi
-
-echo "Setting environment variables..."
-if ! source ./env.sh; then
-    echo "Failed to set environment variables."
-    return 1
-fi
-
-echo "Grok's Fantasy Installed!"
+echo "Installed packages:"
+pip list
+echo "Setup complete. Virtual environment is activated."

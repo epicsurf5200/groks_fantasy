@@ -1,0 +1,25 @@
+# Python virtual environment
+venv_groks_fantasy/
+
+# Sensitive configuration file
+config.yaml
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE and editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# macOS system files
+.DS_Store
+
+# Other common ignores
+*.log
+*.bak
+*.swp
