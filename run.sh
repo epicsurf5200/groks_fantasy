@@ -1,9 +1,7 @@
 #!/bin/bash
 
-# Exit on any error
 set -e
 
-# Run install.sh to set up virtual environment and dependencies
 echo "Running install.sh..."
 if [ -f "./install.sh" ]; then
     chmod +x ./install.sh
@@ -13,7 +11,6 @@ else
     exit 1
 fi
 
-# Activate virtual environment
 VENV_DIR="venv_groks_fantasy"
 if [ -d "$VENV_DIR" ]; then
     echo "Activating virtual environment..."
@@ -23,7 +20,6 @@ else
     exit 1
 fi
 
-# Run main.py
 echo "Running main.py..."
 if [ -f "main.py" ]; then
     python3 main.py

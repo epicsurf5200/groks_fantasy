@@ -1,7 +1,8 @@
 import requests
 import yaml
 import json
-from espn_fetcher import get_league  # To get current_week dynamically
+import os
+from espn_fetcher import get_league
 
 def load_grok_config():
     with open('config.yaml', 'r') as f:
@@ -10,34 +11,51 @@ def load_grok_config():
 def load_yaml_file(file_path):
     if not os.path.exists(file_path):
         return None
-    with open(file_path, 'r') as f:
-        return yaml.safe_load(f)
+    try:
+        with open(file_path, 'r') as f:
+            return yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        print(f"Error loading {file_path}: {e}")
+        return None
 
-def query_grok(prompt, data=None, include_league_data=True):
-    config = load_grok_config()
-    full_prompt = prompt
+def build_fantasy_prompt(query_type, data=None, include_league_data=True):
+    """Builds a prompt tailored for fantasy football queries."""
+    settings = yaml.safe_load(open('config.yaml'))['settings']
+    prompt = f"You are an expert in fantasy football for a {settings['scoring_type']} league. "
+
+    if query_type == "trade":
+        prompt += "Analyze the following trade proposal and suggest if it's fair or beneficial. Provide reasoning based on player performance, team needs, and league context."
+    elif query_type == "waiver":
+        prompt += "Suggest the top 3 waiver wire pickups based on recent performance, team needs, and league context. Include reasoning."
+    elif query_type == "lineup":
+        prompt += "Recommend an optimal starting lineup for this week based on player performance, matchups, and league context."
+    else:
+        prompt += query_type  # Custom prompt
 
     if include_league_data:
-        # Load league data from YAML files
+        league = get_league()
+        previous_week = max(league.current_week - 1, 1)
+        
         activity_data = load_yaml_file('league_activity.yaml') or {}
         standings_data = load_yaml_file('league_standings.yaml') or {}
         current_week_data = load_yaml_file('league_current_week.yaml') or {}
-
-        # Dynamically load previous week result
-        league = get_league()
-        previous_week = max(league.current_week - 1, 1)
         week_result_data = load_yaml_file(f'league_week{previous_week}_result.yaml') or {}
 
-        # Append data to prompt
-        full_prompt += "\n\nLeague Context:"
-        full_prompt += f"\nRecent Activity (Trades/Free Agents): {json.dumps(activity_data)}"
-        full_prompt += f"\nStandings (Points/Expected Finish): {json.dumps(standings_data)}"
-        full_prompt += f"\nCurrent Week Matchups (Estimated Points): {json.dumps(current_week_data)}"
-        full_prompt += f"\nPrevious Week Results (Player Points): {json.dumps(week_result_data)}"
+        prompt += "\n\nLeague Context:"
+        prompt += f"\nRecent Trades/Acquisitions: {json.dumps(activity_data, indent=2)}"
+        prompt += f"\nStandings (Points/Expected Finish): {json.dumps(standings_data, indent=2)}"
+        prompt += f"\nCurrent Week Matchups (Projected Points): {json.dumps(current_week_data, indent=2)}"
+        prompt += f"\nPrevious Week Results (Player Points): {json.dumps(week_result_data, indent=2)}"
 
     if data:
-        full_prompt += f"\nAdditional Data: {json.dumps(data)}"
+        prompt += f"\nAdditional Data (e.g., rosters, trade details): {json.dumps(data, indent=2)}"
 
+    return prompt
+
+def query_grok(query_type, data=None, include_league_data=True):
+    config = load_grok_config()
+    prompt = build_fantasy_prompt(query_type, data, include_league_data)
+    
     url = "https://api.x.ai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {config['api_key']}",
@@ -45,15 +63,19 @@ def query_grok(prompt, data=None, include_league_data=True):
     }
     payload = {
         "model": config['model'],
-        "messages": [{"role": "user", "content": full_prompt}]
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1000  # Adjust for response length
     }
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code == 200:
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
         return response.json()['choices'][0]['message']['content']
-    else:
-        raise Exception(f"API error: {response.text}")
+    except requests.RequestException as e:
+        print(f"Grok API error: {e}")
+        return None
 
 if __name__ == "__main__":
     rosters = {"MyTeam": ["Player1", "Player2"]}
-    suggestion = query_grok("Suggest waiver pickups.", rosters)
-    print(suggestion)
+    suggestion = query_grok("waiver", rosters)
+    print(f"Waiver Suggestions: {suggestion}")
