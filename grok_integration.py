@@ -9,13 +9,14 @@ def load_grok_config():
         return yaml.safe_load(f)['grok']
 
 def load_yaml_file(file_path):
-    if not os.path.exists(file_path):
+    full_path = os.path.join('league_data', file_path)
+    if not os.path.exists(full_path):
         return None
     try:
-        with open(file_path, 'r') as f:
+        with open(full_path, 'r') as f:
             return yaml.safe_load(f)
     except yaml.YAMLError as e:
-        print(f"Error loading {file_path}: {e}")
+        print(f"Error loading {full_path}: {e}")
         return None
 
 def build_fantasy_prompt(query_type, data=None, include_league_data=True):

@@ -23,5 +23,6 @@ __pycache__/
 *.log
 *.bak
 *.swp
-league_activity.yaml
+# League data files
+league_data/*
 config.yaml
