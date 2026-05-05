@@ -1,10 +1,13 @@
 use crate::anthropic::Anthropic;
 use crate::draft::DraftManager;
 use crate::lineup;
-use crate::news::{self, NewsFetcher, NewsItem};
+use crate::news::NewsFetcher;
 use crate::providers::Provider;
+use crate::scheduler::Scheduler;
 use crate::strategy::Strategy;
+use crate::trade::{self, TradeAnalysis};
 use crate::types::*;
+use crate::waiver::{self, WaiverReport};
 use anyhow::Result;
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -18,23 +21,36 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
 use ratatui::Terminal;
 use std::io;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Roster,
     Lineup,
+    Waiver,
+    Trade,
     Draft,
     News,
     Help,
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [Tab::Roster, Tab::Lineup, Tab::Draft, Tab::News, Tab::Help];
+    const ALL: [Tab; 7] = [
+        Tab::Roster,
+        Tab::Lineup,
+        Tab::Waiver,
+        Tab::Trade,
+        Tab::Draft,
+        Tab::News,
+        Tab::Help,
+    ];
     fn label(&self) -> &'static str {
         match self {
             Self::Roster => "Roster",
             Self::Lineup => "Lineup",
+            Self::Waiver => "Waiver",
+            Self::Trade => "Trade",
             Self::Draft => "Draft",
             Self::News => "News",
             Self::Help => "Help",
@@ -43,46 +59,56 @@ impl Tab {
 }
 
 pub struct App {
-    pub provider: Box<dyn Provider>,
+    pub provider: Arc<dyn Provider>,
     pub anthropic: Anthropic,
-    pub news_fetcher: NewsFetcher,
+    pub news_fetcher: Arc<NewsFetcher>,
     pub strategy: Strategy,
+    scheduler: Arc<Scheduler>,
     tab: Tab,
     status: String,
-    roster: Option<Roster>,
-    settings: Option<LeagueSettings>,
-    week: u8,
-    matchups: Vec<Matchup>,
-    news: Vec<NewsItem>,
     lineup: Option<Lineup>,
-    draft: Option<crate::types::DraftState>,
+    waiver: Option<WaiverReport>,
+    trade: Option<TradeAnalysis>,
     draft_suggestion: Option<crate::draft::DraftSuggestion>,
-    last_refresh: Instant,
+    trade_partner_input: String,
+    trade_send_input: String,
+    trade_recv_input: String,
+    trade_focus: TradeField,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TradeField {
+    Partner,
+    Send,
+    Receive,
 }
 
 impl App {
     pub fn new(
-        provider: Box<dyn Provider>,
+        provider: Arc<dyn Provider>,
         anthropic: Anthropic,
-        news_fetcher: NewsFetcher,
+        news_fetcher: Arc<NewsFetcher>,
         strategy: Strategy,
+        refresh_interval: Duration,
     ) -> Self {
+        let scheduler = Arc::new(Scheduler::new(refresh_interval));
+        scheduler.spawn(provider.clone(), news_fetcher.clone());
         Self {
             provider,
             anthropic,
             news_fetcher,
             strategy,
+            scheduler,
             tab: Tab::Roster,
-            status: "Press 'r' to refresh, 'l' for AI lineup, 'd' for draft suggestion, 'q' to quit".into(),
-            roster: None,
-            settings: None,
-            week: 1,
-            matchups: Vec::new(),
-            news: Vec::new(),
+            status: "Background scheduler running. r=refresh now, l=lineup, w=waiver, t=trade analyze, d=draft, s=strategy, q=quit".into(),
             lineup: None,
-            draft: None,
+            waiver: None,
+            trade: None,
             draft_suggestion: None,
-            last_refresh: Instant::now() - Duration::from_secs(3600),
+            trade_partner_input: String::new(),
+            trade_send_input: String::new(),
+            trade_recv_input: String::new(),
+            trade_focus: TradeField::Partner,
         }
     }
 
@@ -109,9 +135,6 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<()> {
-        // Initial refresh
-        self.refresh().await;
-
         loop {
             terminal.draw(|f| self.render(f))?;
 
@@ -120,17 +143,28 @@ impl App {
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
+                    if self.tab == Tab::Trade {
+                        if self.handle_trade_key(key.code).await {
+                            continue;
+                        }
+                    }
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Tab | KeyCode::Right => self.cycle_tab(1),
                         KeyCode::BackTab | KeyCode::Left => self.cycle_tab(-1),
                         KeyCode::Char('1') => self.tab = Tab::Roster,
                         KeyCode::Char('2') => self.tab = Tab::Lineup,
-                        KeyCode::Char('3') => self.tab = Tab::Draft,
-                        KeyCode::Char('4') => self.tab = Tab::News,
-                        KeyCode::Char('?') | KeyCode::Char('5') => self.tab = Tab::Help,
-                        KeyCode::Char('r') => self.refresh().await,
+                        KeyCode::Char('3') => self.tab = Tab::Waiver,
+                        KeyCode::Char('4') => self.tab = Tab::Trade,
+                        KeyCode::Char('5') => self.tab = Tab::Draft,
+                        KeyCode::Char('6') => self.tab = Tab::News,
+                        KeyCode::Char('?') | KeyCode::Char('7') => self.tab = Tab::Help,
+                        KeyCode::Char('r') => {
+                            self.scheduler.poke();
+                            self.status = "Refresh requested.".into();
+                        }
                         KeyCode::Char('l') => self.compute_lineup().await,
+                        KeyCode::Char('w') => self.compute_waiver().await,
                         KeyCode::Char('d') => self.compute_draft().await,
                         KeyCode::Char('s') => self.cycle_strategy(),
                         _ => {}
@@ -139,6 +173,44 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    async fn handle_trade_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::F(2) | KeyCode::Char('\n') => {
+                if matches!(code, KeyCode::F(2)) {
+                    self.compute_trade().await;
+                    return true;
+                }
+                self.compute_trade().await;
+                true
+            }
+            KeyCode::Tab => {
+                self.trade_focus = match self.trade_focus {
+                    TradeField::Partner => TradeField::Send,
+                    TradeField::Send => TradeField::Receive,
+                    TradeField::Receive => TradeField::Partner,
+                };
+                true
+            }
+            KeyCode::Backspace => {
+                self.trade_field_mut().pop();
+                true
+            }
+            KeyCode::Char(c) => {
+                self.trade_field_mut().push(c);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn trade_field_mut(&mut self) -> &mut String {
+        match self.trade_focus {
+            TradeField::Partner => &mut self.trade_partner_input,
+            TradeField::Send => &mut self.trade_send_input,
+            TradeField::Receive => &mut self.trade_recv_input,
+        }
     }
 
     fn cycle_tab(&mut self, dir: i32) {
@@ -156,58 +228,26 @@ impl App {
         self.status = format!("Strategy → {}", self.strategy.label());
     }
 
-    async fn refresh(&mut self) {
-        self.status = "Refreshing roster, matchups, news…".into();
-        match self.provider.league_settings().await {
-            Ok(s) => self.settings = Some(s),
-            Err(e) => self.status = format!("settings error: {e}"),
-        }
-        match self.provider.current_week().await {
-            Ok(w) => self.week = w,
-            Err(e) => self.status = format!("week error: {e}"),
-        }
-        match self.provider.my_roster().await {
-            Ok(r) => self.roster = Some(r),
-            Err(e) => self.status = format!("roster error: {e}"),
-        }
-        match self.provider.matchups(self.week).await {
-            Ok(m) => self.matchups = m,
-            Err(e) => self.status = format!("matchups error: {e}"),
-        }
-        let mut news = self.news_fetcher.fetch_all(50).await;
-        if let Some(roster) = &self.roster {
-            let names: Vec<String> = roster.players.iter().map(|p| p.name.clone()).collect();
-            let filtered = news::relevant_to(&news, &names);
-            if !filtered.is_empty() {
-                news = filtered;
-            }
-        }
-        self.news = news;
-        self.last_refresh = Instant::now();
-        self.status = format!(
-            "Refreshed at {} (provider={}, week={}, strategy={})",
-            chrono::Local::now().format("%H:%M:%S"),
-            self.provider.name(),
-            self.week,
-            self.strategy.label()
-        );
+    fn data(&self) -> crate::scheduler::AppData {
+        self.scheduler.data.read().clone()
     }
 
     async fn compute_lineup(&mut self) {
-        let Some(roster) = self.roster.clone() else {
-            self.status = "Refresh first (r)".into();
+        let data = self.data();
+        let Some(roster) = data.roster else {
+            self.status = "Waiting for first refresh.".into();
             return;
         };
-        let settings = self.settings.clone().unwrap_or_default();
+        let settings = data.settings.unwrap_or_default();
         self.status = format!("Asking Claude ({}) for {} lineup…", self.anthropic.model(), self.strategy.label());
         match lineup::ai_optimize(
             &self.anthropic,
             &roster,
             &settings,
-            &self.matchups,
-            &self.news,
+            &data.matchups,
+            &data.news,
             self.strategy,
-            self.week,
+            data.week,
         )
         .await
         {
@@ -224,12 +264,79 @@ impl App {
         }
     }
 
+    async fn compute_waiver(&mut self) {
+        let news = self.data().news;
+        self.status = "Scoring free agents and asking Claude…".into();
+        match waiver::analyze(
+            self.provider.as_ref(),
+            &self.anthropic,
+            self.strategy,
+            &news,
+            200,
+        )
+        .await
+        {
+            Ok(r) => {
+                self.status = format!("Waiver suggestions ready ({} candidates)", r.candidates.len());
+                self.waiver = Some(r);
+                self.tab = Tab::Waiver;
+            }
+            Err(e) => self.status = format!("waiver error: {e}"),
+        }
+    }
+
+    async fn compute_trade(&mut self) {
+        if self.trade_partner_input.trim().is_empty()
+            || self.trade_send_input.trim().is_empty()
+            || self.trade_recv_input.trim().is_empty()
+        {
+            self.status = "Fill in partner / send / receive (Tab to switch field).".into();
+            return;
+        }
+        let data = self.data();
+        let Some(roster) = data.roster else {
+            self.status = "Waiting for first refresh.".into();
+            return;
+        };
+        let send: Vec<String> = self
+            .trade_send_input
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let recv: Vec<String> = self
+            .trade_recv_input
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self.status = "Computing metrics and asking Claude…".into();
+        match trade::analyze(
+            &self.anthropic,
+            &roster,
+            self.trade_partner_input.trim(),
+            &send,
+            &recv,
+            &data.all_rosters,
+            self.strategy,
+            &data.news,
+        )
+        .await
+        {
+            Ok(a) => {
+                self.status = format!("Verdict {} (net ROS {:+.1})", a.verdict, a.net_ros_delta);
+                self.trade = Some(a);
+            }
+            Err(e) => self.status = format!("trade error: {e}"),
+        }
+    }
+
     async fn compute_draft(&mut self) {
         self.status = "Fetching draft state…".into();
         let team_name = self
+            .data()
             .roster
-            .as_ref()
-            .map(|r| r.team_name.clone())
+            .map(|r| r.team_name)
             .unwrap_or_default();
         let dm = DraftManager {
             provider: self.provider.as_ref(),
@@ -240,22 +347,18 @@ impl App {
         };
         match dm.snapshot().await {
             Ok(state) => {
-                self.draft = Some(state.clone());
                 let my_picks: Vec<DraftPick> = state
                     .picks
                     .iter()
-                    .filter(|p| {
-                        self.roster
-                            .as_ref()
-                            .map(|r| r.team_name.eq_ignore_ascii_case(&p.team_name))
-                            .unwrap_or(false)
-                    })
+                    .filter(|p| p.team_name.eq_ignore_ascii_case(&dm.my_team_name))
                     .cloned()
                     .collect();
                 self.status = "Asking Claude for next picks…".into();
-                match dm.ask_claude(&state, &my_picks, &[], &self.news).await {
+                let news = self.data().news;
+                match dm.ask_claude(&state, &my_picks, &[], &news).await {
                     Ok(s) => {
-                        self.status = format!("Draft suggestions ready ({} candidates)", s.picks.len());
+                        self.status =
+                            format!("Draft suggestions ready ({} candidates)", s.picks.len());
                         self.draft_suggestion = Some(s);
                         self.tab = Tab::Draft;
                     }
@@ -280,6 +383,8 @@ impl App {
         match self.tab {
             Tab::Roster => self.render_roster(f, chunks[1]),
             Tab::Lineup => self.render_lineup(f, chunks[1]),
+            Tab::Waiver => self.render_waiver(f, chunks[1]),
+            Tab::Trade => self.render_trade(f, chunks[1]),
             Tab::Draft => self.render_draft(f, chunks[1]),
             Tab::News => self.render_news(f, chunks[1]),
             Tab::Help => self.render_help(f, chunks[1]),
@@ -290,18 +395,20 @@ impl App {
     fn render_tabs(&self, f: &mut ratatui::Frame, area: Rect) {
         let titles: Vec<Line> = Tab::ALL.iter().map(|t| Line::from(t.label())).collect();
         let selected = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
+        let data = self.data();
+        let last = data
+            .last_refresh
+            .map(|t| format!("{}s ago", t.elapsed().as_secs()))
+            .unwrap_or_else(|| "never".into());
         let tabs = Tabs::new(titles)
             .select(selected)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(
-                        " groks_fantasy — {} | week {} | strategy {} ",
-                        self.provider.name(),
-                        self.week,
-                        self.strategy.label()
-                    )),
-            )
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                " groks_fantasy — {} | wk {} | strategy {} | refresh {} ",
+                self.provider.name(),
+                data.week,
+                self.strategy.label(),
+                last
+            )))
             .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
         f.render_widget(tabs, area);
     }
@@ -315,8 +422,9 @@ impl App {
 
     fn render_roster(&self, f: &mut ratatui::Frame, area: Rect) {
         let block = Block::default().borders(Borders::ALL).title(" My Roster ");
-        let items: Vec<ListItem> = match &self.roster {
-            None => vec![ListItem::new("No data — press 'r' to refresh.")],
+        let data = self.data();
+        let items: Vec<ListItem> = match data.roster {
+            None => vec![ListItem::new("Waiting for first refresh… (press 'r' to force).")],
             Some(r) => r
                 .players
                 .iter()
@@ -351,6 +459,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(8)])
             .split(area);
+        let week = self.data().week;
         let items: Vec<ListItem> = match &self.lineup {
             None => vec![ListItem::new(
                 "Press 'l' for an AI-generated lineup using your current strategy.",
@@ -375,7 +484,7 @@ impl App {
         };
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Recommended Lineup — week {} ", self.week));
+            .title(format!(" Recommended Lineup — week {} ", week));
         f.render_widget(List::new(items).block(block), chunks[0]);
 
         let reasoning = self
@@ -396,13 +505,141 @@ impl App {
         );
     }
 
+    fn render_waiver(&self, f: &mut ratatui::Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(8)])
+            .split(area);
+        let items: Vec<ListItem> = match &self.waiver {
+            None => vec![ListItem::new("Press 'w' to score free agents and ask Claude.")],
+            Some(r) => r
+                .candidates
+                .iter()
+                .map(|c| {
+                    let drop = match &c.drop_candidate {
+                        Some(d) => format!(
+                            "drop {} (Δ {:+.0})",
+                            d.player.name, d.net_ros_delta
+                        ),
+                        None => "no drop suggested".into(),
+                    };
+                    ListItem::new(format!(
+                        "{}. {:<22} {:<3} {:<4} ROS {:>4.0} floor {:>4.1} ceil {:>4.1} risk {:.2} fit {:.2} | {}",
+                        c.priority,
+                        truncate(&c.player.name, 22),
+                        c.player.position.to_string(),
+                        c.player.team,
+                        c.metrics.ros_value,
+                        c.metrics.floor,
+                        c.metrics.ceiling,
+                        c.metrics.risk_score,
+                        c.metrics.strategy_fit,
+                        drop,
+                    ))
+                })
+                .collect(),
+        };
+        f.render_widget(
+            List::new(items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Waiver candidates "),
+            ),
+            chunks[0],
+        );
+        let raw = self
+            .waiver
+            .as_ref()
+            .map(|w| w.raw.clone())
+            .unwrap_or_default();
+        f.render_widget(
+            Paragraph::new(raw)
+                .wrap(Wrap { trim: true })
+                .block(Block::default().borders(Borders::ALL).title(" Claude analysis ")),
+            chunks[1],
+        );
+    }
+
+    fn render_trade(&self, f: &mut ratatui::Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(7), Constraint::Min(1)])
+            .split(area);
+        let mark = |field: TradeField| -> &str {
+            if self.trade_focus == field {
+                "▶"
+            } else {
+                " "
+            }
+        };
+        let inputs = format!(
+            "{} Partner: {}\n{} Send (you give, comma-separated): {}\n{} Receive (you get, comma-separated): {}\n\n[Tab] cycle field   [Enter/F2] analyze",
+            mark(TradeField::Partner),
+            self.trade_partner_input,
+            mark(TradeField::Send),
+            self.trade_send_input,
+            mark(TradeField::Receive),
+            self.trade_recv_input
+        );
+        f.render_widget(
+            Paragraph::new(inputs)
+                .wrap(Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL).title(" Trade inputs ")),
+            chunks[0],
+        );
+        let body = match &self.trade {
+            None => "No analysis yet.".to_string(),
+            Some(a) => {
+                let send_lines = a
+                    .send
+                    .iter()
+                    .map(|m| format!("    {}", m.one_line()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let recv_lines = a
+                    .receive
+                    .iter()
+                    .map(|m| format!("    {}", m.one_line()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "VERDICT: {}    net ROS {:+.1}    fairness {:.0}%\n\n\
+                     YOU SEND   (mean {:.1} | ceil {:.1} | ROS {:.0} | risk {:.2})\n{}\n\n\
+                     YOU RECEIVE (mean {:.1} | ceil {:.1} | ROS {:.0} | risk {:.2})\n{}\n\n\
+                     Claude analysis:\n{}",
+                    a.verdict,
+                    a.net_ros_delta,
+                    a.fairness * 100.0,
+                    a.send_pkg.total_mean,
+                    a.send_pkg.total_ceiling,
+                    a.send_pkg.total_ros,
+                    a.send_pkg.avg_risk,
+                    send_lines,
+                    a.receive_pkg.total_mean,
+                    a.receive_pkg.total_ceiling,
+                    a.receive_pkg.total_ros,
+                    a.receive_pkg.avg_risk,
+                    recv_lines,
+                    a.ai_summary
+                )
+            }
+        };
+        f.render_widget(
+            Paragraph::new(body)
+                .wrap(Wrap { trim: true })
+                .block(Block::default().borders(Borders::ALL).title(" Trade analysis ")),
+            chunks[1],
+        );
+    }
+
     fn render_draft(&self, f: &mut ratatui::Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(7), Constraint::Min(1)])
             .split(area);
 
-        let header = match &self.draft {
+        let data = self.data();
+        let header = match data.draft {
             None => "Press 'd' to fetch draft state and AI suggestions.".to_string(),
             Some(d) => format!(
                 "Pick #{} (round {}/{}) — {} teams — completed: {}\nLast 5 picks:\n{}",
@@ -435,7 +672,7 @@ impl App {
         );
 
         let items: Vec<ListItem> = match &self.draft_suggestion {
-            None => vec![ListItem::new("(no suggestion yet)")],
+            None => vec![ListItem::new("(no suggestion yet — press 'd')")],
             Some(s) => s
                 .picks
                 .iter()
@@ -459,11 +696,11 @@ impl App {
     }
 
     fn render_news(&self, f: &mut ratatui::Frame, area: Rect) {
-        let items: Vec<ListItem> = if self.news.is_empty() {
-            vec![ListItem::new("No news fetched yet — press 'r'.")]
+        let news = self.data().news;
+        let items: Vec<ListItem> = if news.is_empty() {
+            vec![ListItem::new("Waiting for first news fetch…")]
         } else {
-            self.news
-                .iter()
+            news.iter()
                 .take(50)
                 .map(|n| {
                     ListItem::new(Line::from(vec![
@@ -482,12 +719,14 @@ impl App {
     fn render_help(&self, f: &mut ratatui::Frame, area: Rect) {
         let body = "\
 Keys
-  r        Refresh roster, matchups, news
+  r        Force-refresh roster, matchups, news (background scheduler runs continuously)
   l        Generate AI lineup for current week
+  w        Suggest waiver pickups (with metrics + AI re-rank)
+  t        Switch to Trade tab; type partner / send / receive (Tab to switch field, Enter to analyze)
   d        Fetch draft state and AI pick suggestions
   s        Cycle strategy (Conservative → Balanced → High Stakes)
   Tab/← →  Switch tab
-  1-5      Jump to tab
+  1-7      Jump to tab
   q / Esc  Quit
 
 Strategies
@@ -495,14 +734,16 @@ Strategies
   Balanced     — risk-adjusted projections (default).
   High Stakes  — maximize ceiling, lean into shootouts and breakouts.
 
-Providers
-  ESPN     — set espn.{league_id, season, team_id, swid, espn_s2}
-  Sleeper  — set sleeper.{league_id, user_id|username}
-  Yahoo    — set yahoo.{league_key, team_key, access_token}
+Metrics (waiver/trade)
+  ROS    rest-of-season expected points (mean × injury × 14 weeks)
+  floor  mean − position variance band
+  ceil   mean + position variance band × 1.4
+  risk   0.05 (healthy) … 1.0 (IR)
+  fit    strategy alignment 0..1
 
-API
-  Claude (Anthropic) is the only LLM provider. Set ANTHROPIC_API_KEY
-  or anthropic.api_key in config.yaml.";
+Background data
+  A scheduler refreshes everything on the configured interval (settings.refresh_seconds).
+  Run `ff schedule -i 600` to keep a refresh loop in the foreground for cron / systemd.";
         f.render_widget(
             Paragraph::new(body)
                 .wrap(Wrap { trim: false })
