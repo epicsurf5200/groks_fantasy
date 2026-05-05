@@ -16,7 +16,7 @@ use groks_fantasy::scheduler::Scheduler;
 use groks_fantasy::strategy::Strategy;
 use groks_fantasy::{draft as draft_mod, lineup, trade as trade_mod, types, waiver};
 
-uniffi::setup_scaffolding!();
+uniffi::setup_scaffolding!("FFCore");
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum FfError {
