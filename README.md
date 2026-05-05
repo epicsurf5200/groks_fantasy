@@ -25,9 +25,13 @@ with quantified metrics, and runs an interactive draft assistant.
 - **Background scheduler** — refreshes roster, matchups, news, and draft
   state on a configurable interval (`settings.refresh_seconds`). Runs inside
   the GUI / TUI; can also be run standalone via `ff schedule` for cron.
-- **Two front-ends:**
+- **Four front-ends:**
   - `ff-gui` — egui desktop GUI (Windows / macOS / Linux).
   - `ff` (or `ff ui`) — ratatui terminal UI (anywhere).
+  - `ios/uniffi/` — SwiftUI iPhone app with the Rust core compiled in via
+    UniFFI (no server). See [`ios/README.md`](ios/README.md).
+  - `ios/rest/` — SwiftUI iPhone app that talks to a self-hosted
+    `ff-server` over HTTPS + bearer token.
 - **News ingest** — pulls public RSS feeds (ESPN, Sleeper) and filters to
   items mentioning rostered players before sending to Claude.
 
@@ -165,6 +169,25 @@ A single `Scheduler` shared between GUI and TUI refreshes:
 
 …on the interval set in `settings.refresh_seconds` (default 900 s = 15 min).
 You can override per-run with `--config` or `ff schedule -i <seconds>`.
+
+## iPhone app
+
+Both an embedded-Rust SwiftUI app (option 1) and a REST-client SwiftUI app
+(option 2) live in [`ios/`](ios/) — see [`ios/README.md`](ios/README.md) for
+build steps. The shared Rust core under `crates/ff-ffi/` exports the same
+`Provider`, `Anthropic`, `Scheduler`, `lineup`, `waiver`, `trade`, and
+`draft` modules as `FfClient` to Swift. The REST server in
+`crates/ff-server/` exposes them over JSON for the thin-client app.
+
+```
+crates/
+├── ff-ffi/          # UniFFI staticlib → ios/uniffi (option 1)
+└── ff-server/       # axum HTTP server  → ios/rest    (option 2)
+
+ios/
+├── uniffi/          # SwiftUI app embedding the Rust core
+└── rest/            # SwiftUI app talking to ff-server
+```
 
 ## Architecture
 

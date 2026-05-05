@@ -1,0 +1,36 @@
+# XcodeGen project for the REST-client iOS app.
+# Generate with: cd ios/rest && xcodegen generate
+
+name: GroksFantasyRemote
+options:
+  bundleIdPrefix: com.groksfantasy.remote
+  deploymentTarget:
+    iOS: "16.0"
+  developmentLanguage: en
+configs:
+  Debug: debug
+  Release: release
+
+targets:
+  GroksFantasyRemote:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: groks_fantasy
+        UILaunchScreen:
+          UIColorName: ""
+        # Production servers MUST use HTTPS — App Transport Security is on.
+        # If you point the app at http://localhost during development,
+        # add an NSAllowsLocalNetworking exception here.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: false
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        SWIFT_VERSION: "5.9"

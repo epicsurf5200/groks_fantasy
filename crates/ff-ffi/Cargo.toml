@@ -1,0 +1,25 @@
+[package]
+name = "ff-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "UniFFI bindings exposing groks_fantasy core to Swift / Kotlin"
+license = "MIT"
+
+[lib]
+name = "ff_ffi"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+groks_fantasy = { path = "../..", default-features = false }
+uniffi = { version = "0.28", features = ["tokio", "cli"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

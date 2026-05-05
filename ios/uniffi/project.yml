@@ -1,0 +1,45 @@
+# XcodeGen project for the Rust-core (UniFFI) iOS app.
+# Generate with: cd ios/uniffi && xcodegen generate
+# (install: brew install xcodegen)
+
+name: GroksFantasyCore
+options:
+  bundleIdPrefix: com.groksfantasy
+  deploymentTarget:
+    iOS: "16.0"
+  developmentLanguage: en
+configs:
+  Debug: debug
+  Release: release
+
+targets:
+  GroksFantasyCore:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Generated
+        # Generated/FFCoreFFI.swift comes from `scripts/build-ios.sh`.
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: groks_fantasy
+        UILaunchScreen:
+          UIColorName: ""
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: false
+          # Anthropic API and most fantasy provider APIs are HTTPS-only,
+          # which is what ATS expects, so no exception is needed.
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        SWIFT_VERSION: "5.9"
+        OTHER_LDFLAGS: -lc++
+        # The XCFramework is produced by scripts/build-ios.sh and dropped at
+        # ios/uniffi/Frameworks/FFCore.xcframework.
+        FRAMEWORK_SEARCH_PATHS: $(PROJECT_DIR)/Frameworks
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    dependencies:
+      - framework: Frameworks/FFCore.xcframework
+        embed: true

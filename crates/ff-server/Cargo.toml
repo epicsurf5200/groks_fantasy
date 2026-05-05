@@ -1,0 +1,24 @@
+[package]
+name = "ff-server"
+version = "0.1.0"
+edition = "2021"
+description = "REST API server wrapping groks_fantasy core (option 2 backend)"
+license = "MIT"
+
+[[bin]]
+name = "ff-server"
+path = "src/main.rs"
+
+[dependencies]
+groks_fantasy = { path = "../..", default-features = false }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = "0.7"
+tower-http = { version = "0.6", features = ["cors", "trace", "auth"] }
+clap = { version = "4", features = ["derive"] }

@@ -1,0 +1,25 @@
+[Unit]
+Description=groks_fantasy REST API server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ffserver
+Group=ffserver
+WorkingDirectory=/opt/groks_fantasy
+Environment=FF_SERVER_TOKEN=REPLACE_WITH_RANDOM_HEX_AT_LEAST_32_CHARS
+Environment=ANTHROPIC_API_KEY=sk-ant-REPLACE
+ExecStart=/opt/groks_fantasy/ff-server \
+    --config /etc/groks_fantasy/config.yaml \
+    --bind 127.0.0.1:8088
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/groks_fantasy
+
+[Install]
+WantedBy=multi-user.target
