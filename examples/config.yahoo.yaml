@@ -1,0 +1,27 @@
+# groks_fantasy — Yahoo Fantasy starter config
+#
+# Yahoo Fantasy requires OAuth2. Issue an access_token with one of the
+# many community tools (or implement client-credentials flow yourself), then
+# paste it here. league_key/team_key follow the format `<game_id>.l.<league_id>`.
+
+anthropic:
+  api_key: ""
+  model: claude-sonnet-4-6
+  max_tokens: 2048
+
+provider:
+  kind: yahoo
+  league_key: "REPLACE_WITH_LEAGUE_KEY"
+  team_key: "REPLACE_WITH_TEAM_KEY"
+  access_token: "REPLACE_WITH_ACCESS_TOKEN"
+  refresh_token: ""
+  client_id: ""
+  client_secret: ""
+
+settings:
+  strategy: balanced
+  scoring_type: ppr
+  refresh_seconds: 900
+  auto_set_lineup: false
+  news_sources:
+    - https://www.espn.com/espn/rss/nfl/news

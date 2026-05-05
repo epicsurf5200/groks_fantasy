@@ -1,0 +1,26 @@
+# groks_fantasy — Sleeper starter config
+#
+# Sleeper's API is free and requires no auth. You only need your league_id
+# and either user_id or username.
+
+anthropic:
+  # Leave empty to read from $ANTHROPIC_API_KEY.
+  api_key: ""
+  model: claude-sonnet-4-6
+  max_tokens: 2048
+
+provider:
+  kind: sleeper
+  league_id: "REPLACE_WITH_LEAGUE_ID"   # 18-digit numeric string from Sleeper URL
+  username: "REPLACE_WITH_USERNAME"     # OR set user_id directly
+  # user_id: "REPLACE_WITH_USER_ID"
+  # draft_id: "OPTIONAL_DRAFT_ID"
+
+settings:
+  strategy: balanced       # conservative | balanced | high_stakes
+  scoring_type: ppr        # standard | half_ppr | ppr
+  refresh_seconds: 900
+  auto_set_lineup: false
+  news_sources:
+    - https://www.espn.com/espn/rss/nfl/news
+    - https://api.sleeper.app/news/nfl/rss

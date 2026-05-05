@@ -1,28 +1,25 @@
-# Python virtual environment
-venv_groks_fantasy/
+# Rust
+/target/
+Cargo.lock.bak
+**/*.rs.bk
 
-# Sensitive configuration file
+# Sensitive configuration
 config.yaml
+*.local.yaml
 
-# Python cache files
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+# Cached league data
+league_data/
 
-# IDE and editor files
+# IDE
 .vscode/
 .idea/
 *.sublime-project
 *.sublime-workspace
 
-# macOS system files
+# OS
 .DS_Store
 
-# Other common ignores
+# Misc
 *.log
 *.bak
 *.swp
-# League data files
-league_data/*
-config.yaml
