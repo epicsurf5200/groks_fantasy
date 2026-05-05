@@ -1,0 +1,31 @@
+[package]
+name = "groks_fantasy"
+version = "0.2.0"
+edition = "2021"
+description = "Autonomous AI-powered fantasy football manager"
+license = "MIT"
+
+[[bin]]
+name = "ff"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "cookies", "gzip"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+anyhow = "1"
+thiserror = "2"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+ratatui = "0.28"
+crossterm = "0.28"
+url = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+quick-xml = { version = "0.36", features = ["serialize"] }
+futures = "0.3"
+itertools = "0.13"
+dirs = "5"

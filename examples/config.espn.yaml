@@ -1,0 +1,28 @@
+# groks_fantasy — ESPN starter config
+#
+# Find league_id in the URL of any ESPN fantasy page. For private leagues,
+# log in via browser, open DevTools → Application → Cookies → espn.com and
+# copy the SWID and espn_s2 values. team_id is the integer of your team in
+# the league.
+
+anthropic:
+  api_key: ""
+  model: claude-sonnet-4-6
+  max_tokens: 2048
+
+provider:
+  kind: espn
+  league_id: 0
+  season: 2026
+  team_id: 1
+  swid: "{REPLACE-WITH-SWID-GUID}"
+  espn_s2: "REPLACE_WITH_ESPN_S2_COOKIE"
+
+settings:
+  strategy: balanced
+  scoring_type: ppr
+  refresh_seconds: 900
+  auto_set_lineup: false
+  news_sources:
+    - https://www.espn.com/espn/rss/nfl/news
+    - https://api.sleeper.app/news/nfl/rss
