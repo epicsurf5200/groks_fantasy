@@ -1,0 +1,230 @@
+//! Waiver analysis, Sleeper-native.
+//!
+//! Signals used per candidate:
+//!   - Sleeper weekly projections (real, not heuristic)
+//!   - League-wide trending adds/drops over the last 24h (community wisdom)
+//!   - Local PlayerMetrics (floor/ceiling/risk/strategy fit)
+//!   - Drop candidate at the same position from your roster
+//! Claude then re-ranks the shortlist with news + recent league transactions.
+
+use crate::anthropic::Anthropic;
+use crate::api::LeagueSession;
+use crate::metrics::PlayerMetrics;
+use crate::news::NewsItem;
+use crate::strategy::Strategy;
+use crate::types::*;
+use anyhow::Result;
+use std::collections::HashMap;
+
+#[derive(Debug, Clone)]
+pub struct WaiverCandidate {
+    pub priority: u32,
+    pub player: Player,
+    pub metrics: PlayerMetrics,
+    pub trending_adds: Option<u64>,
+    pub drop_candidate: Option<DropCandidate>,
+    pub reasoning: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropCandidate {
+    pub player: Player,
+    pub metrics: PlayerMetrics,
+    pub net_ros_delta: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct WaiverReport {
+    pub candidates: Vec<WaiverCandidate>,
+    pub raw: String,
+}
+
+pub async fn analyze(
+    session: &LeagueSession,
+    anthropic: &Anthropic,
+    strategy: Strategy,
+    news: &[NewsItem],
+    pool: usize,
+) -> Result<WaiverReport> {
+    let week = session.current_week().await?;
+    let roster = session.my_roster(week).await?;
+    let free_agents = session.free_agents(None, week, pool).await?;
+    let trending = session
+        .trending_players(TrendDirection::Add, 50)
+        .await
+        .unwrap_or_default();
+    let trending_counts: HashMap<&str, u64> = trending
+        .iter()
+        .map(|t| (t.player.id.as_str(), t.count))
+        .collect();
+    let transactions = session.recent_transactions(week, 2).await.unwrap_or_default();
+
+    let roster_metrics: Vec<PlayerMetrics> = roster
+        .players
+        .iter()
+        .map(|p| PlayerMetrics::for_player(p, strategy))
+        .collect();
+
+    // Weakest rostered player per position (drop candidates).
+    let mut weakest_at: HashMap<Position, usize> = HashMap::new();
+    for (i, m) in roster_metrics.iter().enumerate() {
+        if matches!(roster.players[i].roster_slot, Position::IR) {
+            continue;
+        }
+        weakest_at
+            .entry(m.position)
+            .and_modify(|cur| {
+                if m.ros_value < roster_metrics[*cur].ros_value {
+                    *cur = i;
+                }
+            })
+            .or_insert(i);
+    }
+
+    // Score every free agent: projection upgrade × strategy fit, boosted by
+    // trending count (log-scaled so a 10k-add player doesn't drown out signal).
+    let mut scored: Vec<(usize, f32, PlayerMetrics)> = free_agents
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let m = PlayerMetrics::for_player(p, strategy);
+            let upgrade = weakest_at
+                .get(&m.position)
+                .map(|idx| m.ros_value - roster_metrics[*idx].ros_value)
+                .unwrap_or(m.ros_value);
+            let trend_boost = trending_counts
+                .get(p.id.as_str())
+                .map(|c| 1.0 + (*c as f32).ln_1p() / 10.0)
+                .unwrap_or(1.0);
+            let score = upgrade * (0.5 + 0.5 * m.strategy_fit) * trend_boost;
+            (i, score, m)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let candidates: Vec<WaiverCandidate> = scored
+        .into_iter()
+        .filter(|(_, score, _)| *score > 0.0)
+        .take(8)
+        .enumerate()
+        .map(|(rank, (idx, score, metrics))| {
+            let player = free_agents[idx].clone();
+            let drop_candidate = weakest_at.get(&metrics.position).map(|widx| DropCandidate {
+                player: roster.players[*widx].clone(),
+                metrics: roster_metrics[*widx].clone(),
+                net_ros_delta: metrics.ros_value - roster_metrics[*widx].ros_value,
+            });
+            let trending_adds = trending_counts.get(player.id.as_str()).copied();
+            WaiverCandidate {
+                priority: (rank + 1) as u32,
+                reasoning: format!(
+                    "score {:.1}{}",
+                    score,
+                    trending_adds
+                        .map(|c| format!(", {c} adds/24h league-wide"))
+                        .unwrap_or_default()
+                ),
+                player,
+                metrics,
+                trending_adds,
+                drop_candidate,
+            }
+        })
+        .collect();
+
+    let raw = ai_polish(anthropic, &roster, &candidates, news, &transactions, strategy)
+        .await
+        .unwrap_or_default();
+
+    Ok(WaiverReport { candidates, raw })
+}
+
+async fn ai_polish(
+    anthropic: &Anthropic,
+    roster: &Roster,
+    candidates: &[WaiverCandidate],
+    news: &[NewsItem],
+    transactions: &[Transaction],
+    strategy: Strategy,
+) -> Result<String> {
+    if candidates.is_empty() {
+        return Ok(String::new());
+    }
+    let system = format!(
+        "You are an autonomous fantasy football GM finalizing a waiver report \
+         for a Sleeper league. {}\n\
+         Re-rank or confirm the candidate list. Consider the trending-add \
+         counts (league-wide Sleeper community behavior), your league's recent \
+         transactions (what rivals are doing), and the news. End with a \
+         2-4 sentence action summary including FAAB bid sizing advice \
+         (aggressive/moderate/minimal).",
+        strategy.guidance()
+    );
+    let cand_block = candidates
+        .iter()
+        .map(|c| {
+            let drop = c
+                .drop_candidate
+                .as_ref()
+                .map(|d| format!("drop {} (Δ {:+.0} ROS)", d.player.name, d.net_ros_delta))
+                .unwrap_or_else(|| "no drop needed".into());
+            format!(
+                "{}. {} ({} {}) proj {:.1}/wk ROS {:.0} risk {:.2} fit {:.2}{} | {}",
+                c.priority,
+                c.player.name,
+                c.player.position,
+                c.player.team,
+                c.metrics.adjusted_next_week,
+                c.metrics.ros_value,
+                c.metrics.risk_score,
+                c.metrics.strategy_fit,
+                c.trending_adds
+                    .map(|n| format!(" | {n} adds/24h"))
+                    .unwrap_or_default(),
+                drop
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tx_block = transactions
+        .iter()
+        .take(12)
+        .map(|t| {
+            let adds: Vec<String> = t.adds.iter().map(|(p, tm)| format!("{tm} +{p}")).collect();
+            let drops: Vec<String> = t.drops.iter().map(|(p, tm)| format!("{tm} -{p}")).collect();
+            format!(
+                "wk{} {} [{}]: {} {}{}",
+                t.week,
+                t.kind,
+                t.status,
+                adds.join(", "),
+                drops.join(", "),
+                t.waiver_bid.map(|b| format!(" (${b} FAAB)")).unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let news_block = news
+        .iter()
+        .take(10)
+        .map(|n| format!("- [{}] {}", n.source, n.title))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let roster_names = roster
+        .players
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let user = format!(
+        "My roster: {roster_names}\n\n\
+         Candidates (metrics + trending):\n{cand_block}\n\n\
+         Recent league transactions:\n{}\n\n\
+         Recent news:\n{}\n\n\
+         Give the final ranked top 5 with one-line rationale each, then the \
+         action summary with FAAB advice.",
+        if tx_block.is_empty() { "(none)" } else { &tx_block },
+        if news_block.is_empty() { "(none)" } else { &news_block },
+    );
+    anthropic.complete(&system, &user).await
+}

@@ -1,0 +1,20 @@
+# sleeper-agent config
+#
+# Only your Sleeper username is required — leagues are auto-discovered.
+# Run `sa leagues` to list them, then pin one here if you're in several.
+
+anthropic:
+  api_key: ""              # empty → read from $ANTHROPIC_API_KEY
+  model: claude-sonnet-4-6
+  max_tokens: 2048
+
+sleeper:
+  username: "REPLACE_WITH_SLEEPER_USERNAME"
+  league_id: ""            # optional; first discovered league when empty
+
+settings:
+  strategy: balanced       # conservative | balanced | high_stakes
+  refresh_seconds: 900
+  news_sources:
+    - https://www.espn.com/espn/rss/nfl/news
+    - https://api.sleeper.app/news/nfl/rss

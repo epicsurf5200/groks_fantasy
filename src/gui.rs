@@ -1,0 +1,611 @@
+//! Egui desktop GUI (feature `gui`).
+
+use crate::anthropic::Anthropic;
+use crate::api::LeagueSession;
+use crate::draft::{DraftManager, DraftSuggestion};
+use crate::lineup;
+use crate::scheduler::{AppData, Scheduler};
+use crate::strategy::Strategy;
+use crate::trade::{self, TradeAnalysis};
+use crate::types::*;
+use crate::waiver::{self, WaiverReport};
+use eframe::egui;
+use parking_lot::Mutex;
+use std::sync::Arc;
+use std::time::Duration;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Roster,
+    Lineup,
+    Waiver,
+    Trade,
+    Trending,
+    Activity,
+    Draft,
+    News,
+}
+
+const ALL_TABS: &[(Tab, &str)] = &[
+    (Tab::Roster, "Roster"),
+    (Tab::Lineup, "Lineup"),
+    (Tab::Waiver, "Waiver"),
+    (Tab::Trade, "Trades"),
+    (Tab::Trending, "Trending"),
+    (Tab::Activity, "Activity"),
+    (Tab::Draft, "Draft"),
+    (Tab::News, "News"),
+];
+
+pub struct GuiApp {
+    rt: tokio::runtime::Handle,
+    session: Arc<LeagueSession>,
+    anthropic: Arc<Anthropic>,
+    scheduler: Arc<Scheduler>,
+    strategy: Strategy,
+    tab: Tab,
+    status: Arc<Mutex<String>>,
+    lineup: Arc<Mutex<Option<Lineup>>>,
+    waiver: Arc<Mutex<Option<WaiverReport>>>,
+    trade: Arc<Mutex<Option<TradeAnalysis>>>,
+    draft_sugg: Arc<Mutex<Option<DraftSuggestion>>>,
+    busy: Arc<Mutex<std::collections::HashSet<&'static str>>>,
+    trade_partner: String,
+    trade_send: String,
+    trade_receive: String,
+}
+
+impl GuiApp {
+    fn data(&self) -> AppData {
+        self.scheduler.data.read().clone()
+    }
+    fn is_busy(&self, key: &str) -> bool {
+        self.busy.lock().contains(key)
+    }
+}
+
+impl eframe::App for GuiApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.request_repaint_after(Duration::from_secs(1));
+        egui::TopBottomPanel::top("top").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("sleeper-agent");
+                ui.separator();
+                let data = self.data();
+                ui.label(format!("week {}", data.week));
+                ui.separator();
+                let mut s = self.strategy;
+                egui::ComboBox::from_id_salt("strategy")
+                    .selected_text(s.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut s, Strategy::Conservative, "Conservative");
+                        ui.selectable_value(&mut s, Strategy::Balanced, "Balanced");
+                        ui.selectable_value(&mut s, Strategy::HighStakes, "High Stakes");
+                    });
+                self.strategy = s;
+                ui.separator();
+                if ui.button("Refresh now").clicked() {
+                    self.scheduler.poke();
+                }
+                if let Some(t) = data.last_refresh {
+                    ui.label(format!("refreshed {}s ago", t.elapsed().as_secs()));
+                }
+                if let Some(err) = &data.last_error {
+                    ui.colored_label(egui::Color32::RED, err);
+                }
+            });
+            ui.horizontal(|ui| {
+                for (t, label) in ALL_TABS {
+                    if ui.selectable_label(self.tab == *t, *label).clicked() {
+                        self.tab = *t;
+                    }
+                }
+            });
+        });
+        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.label(self.status.lock().clone());
+        });
+        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
+            Tab::Roster => self.render_roster(ui),
+            Tab::Lineup => self.render_lineup(ui, ctx),
+            Tab::Waiver => self.render_waiver(ui, ctx),
+            Tab::Trade => self.render_trade(ui, ctx),
+            Tab::Trending => self.render_trending(ui),
+            Tab::Activity => self.render_activity(ui),
+            Tab::Draft => self.render_draft(ui, ctx),
+            Tab::News => self.render_news(ui),
+        });
+    }
+}
+
+impl GuiApp {
+    fn render_roster(&self, ui: &mut egui::Ui) {
+        let data = self.data();
+        let Some(r) = data.roster else {
+            ui.label("Waiting for first refresh…");
+            return;
+        };
+        ui.label(format!(
+            "{} ({}-{}-{}, PF {:.1}, PA {:.1})",
+            r.team_name, r.wins, r.losses, r.ties, r.points_for, r.points_against
+        ));
+        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::Grid::new("roster").num_columns(6).striped(true).show(ui, |ui| {
+                for h in ["Slot", "Player", "Pos", "Team", "Status", "Proj"] {
+                    ui.strong(h);
+                }
+                ui.end_row();
+                for p in &r.players {
+                    let color = match p.status {
+                        PlayerStatus::Out | PlayerStatus::IR | PlayerStatus::Suspended => {
+                            egui::Color32::LIGHT_RED
+                        }
+                        PlayerStatus::Doubtful => egui::Color32::YELLOW,
+                        PlayerStatus::Questionable => egui::Color32::from_rgb(220, 220, 120),
+                        _ => ui.style().visuals.text_color(),
+                    };
+                    ui.colored_label(color, p.roster_slot.to_string());
+                    ui.colored_label(color, &p.name);
+                    ui.colored_label(color, p.position.to_string());
+                    ui.colored_label(color, &p.team);
+                    ui.colored_label(color, p.status.to_string());
+                    ui.colored_label(color, format!("{:.1}", p.projected_points));
+                    ui.end_row();
+                }
+            });
+        });
+    }
+
+    fn render_lineup(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.horizontal(|ui| {
+            let busy = self.is_busy("lineup");
+            if ui.add_enabled(!busy, egui::Button::new("Generate AI lineup")).clicked() {
+                self.spawn_lineup(ctx.clone());
+            }
+            if busy {
+                ui.spinner();
+            }
+        });
+        ui.separator();
+        if let Some(l) = self.lineup.lock().clone() {
+            ui.label(format!("Week {} — projected {:.1}", l.week, l.projected_total));
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("lineup").num_columns(4).striped(true).show(ui, |ui| {
+                    for s in &l.starters {
+                        ui.label(s.slot.to_string());
+                        match &s.player {
+                            Some(p) => {
+                                ui.label(&p.name);
+                                ui.label(p.status.to_string());
+                                ui.label(format!("{:.1}", p.projected_points));
+                            }
+                            None => {
+                                ui.label("(empty)");
+                                ui.label("");
+                                ui.label("");
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+                ui.separator();
+                ui.label(&l.reasoning);
+            });
+        } else {
+            ui.label("No lineup yet.");
+        }
+    }
+
+    fn render_waiver(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.horizontal(|ui| {
+            let busy = self.is_busy("waiver");
+            if ui
+                .add_enabled(!busy, egui::Button::new("Suggest waiver pickups"))
+                .clicked()
+            {
+                self.spawn_waiver(ctx.clone());
+            }
+            if busy {
+                ui.spinner();
+            }
+        });
+        ui.separator();
+        if let Some(r) = self.waiver.lock().clone() {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("waiver").num_columns(7).striped(true).show(ui, |ui| {
+                    for h in ["#", "Pickup", "Pos/Team", "Proj/wk", "ROS", "Adds/24h", "Drop"] {
+                        ui.strong(h);
+                    }
+                    ui.end_row();
+                    for c in &r.candidates {
+                        ui.label(c.priority.to_string());
+                        ui.label(&c.player.name);
+                        ui.label(format!("{} {}", c.player.position, c.player.team));
+                        ui.label(format!("{:.1}", c.metrics.adjusted_next_week));
+                        ui.label(format!("{:.0}", c.metrics.ros_value));
+                        ui.label(
+                            c.trending_adds
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| "—".into()),
+                        );
+                        match &c.drop_candidate {
+                            Some(d) => {
+                                ui.label(format!("{} (Δ{:+.0})", d.player.name, d.net_ros_delta))
+                            }
+                            None => ui.label("—"),
+                        };
+                        ui.end_row();
+                    }
+                });
+                ui.separator();
+                ui.label(&r.raw);
+            });
+        } else {
+            ui.label("No suggestions yet.");
+        }
+    }
+
+    fn render_trade(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        egui::Grid::new("trade_in").num_columns(2).show(ui, |ui| {
+            ui.label("Partner team:");
+            ui.text_edit_singleline(&mut self.trade_partner);
+            ui.end_row();
+            ui.label("You send:");
+            ui.text_edit_singleline(&mut self.trade_send);
+            ui.end_row();
+            ui.label("You receive:");
+            ui.text_edit_singleline(&mut self.trade_receive);
+            ui.end_row();
+        });
+        let busy = self.is_busy("trade");
+        if ui.add_enabled(!busy, egui::Button::new("Analyze trade")).clicked() {
+            self.spawn_trade(ctx.clone());
+        }
+        if busy {
+            ui.spinner();
+        }
+        ui.separator();
+        if let Some(a) = self.trade.lock().clone() {
+            let color = match a.verdict {
+                "ACCEPT" => egui::Color32::LIGHT_GREEN,
+                "DECLINE" => egui::Color32::LIGHT_RED,
+                _ => egui::Color32::YELLOW,
+            };
+            ui.horizontal(|ui| {
+                ui.heading("Verdict:");
+                ui.colored_label(color, a.verdict);
+                ui.label(format!(
+                    "net ROS {:+.1} | fairness {:.0}%",
+                    a.net_ros_delta,
+                    a.fairness * 100.0
+                ));
+            });
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading("You send");
+                for m in &a.send {
+                    ui.label(m.one_line());
+                }
+                ui.heading("You receive");
+                for m in &a.receive {
+                    ui.label(m.one_line());
+                }
+                ui.separator();
+                ui.label(&a.ai_summary);
+            });
+        }
+    }
+
+    fn render_trending(&self, ui: &mut egui::Ui) {
+        let data = self.data();
+        ui.columns(2, |cols| {
+            cols[0].heading("Trending ADDS (24h)");
+            egui::ScrollArea::vertical()
+                .id_salt("adds")
+                .show(&mut cols[0], |ui| {
+                    for t in &data.trending_add {
+                        ui.label(format!(
+                            "{:>6}  {} ({} {}) proj {:.1}",
+                            t.count,
+                            t.player.name,
+                            t.player.position,
+                            t.player.team,
+                            t.player.projected_points
+                        ));
+                    }
+                });
+            cols[1].heading("Trending DROPS (24h)");
+            egui::ScrollArea::vertical()
+                .id_salt("drops")
+                .show(&mut cols[1], |ui| {
+                    for t in &data.trending_drop {
+                        ui.label(format!(
+                            "{:>6}  {} ({} {})",
+                            t.count, t.player.name, t.player.position, t.player.team
+                        ));
+                    }
+                });
+        });
+    }
+
+    fn render_activity(&self, ui: &mut egui::Ui) {
+        let data = self.data();
+        ui.heading("League activity");
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for t in data.transactions.iter().take(50) {
+                let adds: Vec<String> = t.adds.iter().map(|(p, tm)| format!("{tm} +{p}")).collect();
+                let drops: Vec<String> = t.drops.iter().map(|(p, tm)| format!("{tm} -{p}")).collect();
+                ui.label(format!(
+                    "wk{} {} [{}] {} {}{}",
+                    t.week,
+                    t.kind,
+                    t.status,
+                    adds.join(", "),
+                    drops.join(", "),
+                    t.waiver_bid.map(|b| format!(" (${b} FAAB)")).unwrap_or_default(),
+                ));
+            }
+            if !data.traded_picks.is_empty() {
+                ui.separator();
+                ui.heading("Traded picks");
+                for p in &data.traded_picks {
+                    ui.label(format!(
+                        "{} R{}: {} → {}",
+                        p.season, p.round, p.original_owner, p.current_owner
+                    ));
+                }
+            }
+            if !data.winners_bracket.is_empty() {
+                ui.separator();
+                ui.heading("Winners bracket");
+                for m in &data.winners_bracket {
+                    ui.label(format!(
+                        "R{} M{}: {} vs {}{}",
+                        m.round,
+                        m.match_id,
+                        m.team1.as_deref().unwrap_or("TBD"),
+                        m.team2.as_deref().unwrap_or("TBD"),
+                        m.winner.as_deref().map(|w| format!(" → {w}")).unwrap_or_default(),
+                    ));
+                }
+            }
+        });
+    }
+
+    fn render_draft(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.horizontal(|ui| {
+            let busy = self.is_busy("draft");
+            if ui
+                .add_enabled(!busy, egui::Button::new("Refresh draft & suggest"))
+                .clicked()
+            {
+                self.spawn_draft(ctx.clone());
+            }
+            if busy {
+                ui.spinner();
+            }
+        });
+        ui.separator();
+        let data = self.data();
+        if let Some(d) = &data.draft {
+            ui.label(format!(
+                "Pick #{} — round {}/{} — {} teams{}",
+                d.current_pick,
+                ((d.current_pick.saturating_sub(1) / d.team_count.max(1)) + 1),
+                d.total_rounds,
+                d.team_count,
+                d.on_the_clock_team
+                    .as_deref()
+                    .map(|t| format!(" — {t} on the clock"))
+                    .unwrap_or_default(),
+            ));
+            for p in d.picks.iter().rev().take(10).rev() {
+                ui.label(format!(
+                    "R{}.{} {} → {}",
+                    p.round,
+                    p.pick_number,
+                    p.team_name,
+                    p.player_name.as_deref().unwrap_or("?")
+                ));
+            }
+        } else {
+            ui.label("No draft state.");
+        }
+        if let Some(s) = self.draft_sugg.lock().clone() {
+            ui.separator();
+            ui.heading("Top 3 candidates");
+            for p in &s.picks {
+                ui.label(format!(
+                    "{}. {} ({}) — {}",
+                    p.rank,
+                    p.name,
+                    p.position.map(|x| x.to_string()).unwrap_or_else(|| "?".into()),
+                    p.rationale
+                ));
+            }
+        }
+    }
+
+    fn render_news(&self, ui: &mut egui::Ui) {
+        let data = self.data();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for n in data.news.iter().take(80) {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("[{}]", n.source)).strong());
+                    if !n.url.is_empty() {
+                        ui.hyperlink_to(&n.title, &n.url);
+                    } else {
+                        ui.label(&n.title);
+                    }
+                });
+            }
+        });
+    }
+
+    fn spawn_lineup(&self, ctx: egui::Context) {
+        let key = "lineup";
+        self.busy.lock().insert(key);
+        let data = self.data();
+        let Some(roster) = data.roster else {
+            *self.status.lock() = "No roster yet.".into();
+            self.busy.lock().remove(key);
+            return;
+        };
+        let settings = data.settings.unwrap_or_default();
+        let (week, news, matchups) = (data.week, data.news, data.matchups);
+        let (strat, anthropic) = (self.strategy, self.anthropic.clone());
+        let (slot, busy, status) = (self.lineup.clone(), self.busy.clone(), self.status.clone());
+        self.rt.spawn(async move {
+            match lineup::ai_optimize(&anthropic, &roster, &settings, &matchups, &news, strat, week).await {
+                Ok(l) => {
+                    *status.lock() = format!("Lineup ready — projected {:.1}", l.projected_total);
+                    *slot.lock() = Some(l);
+                }
+                Err(e) => *status.lock() = format!("lineup error: {e}"),
+            }
+            busy.lock().remove(key);
+            ctx.request_repaint();
+        });
+    }
+
+    fn spawn_waiver(&self, ctx: egui::Context) {
+        let key = "waiver";
+        self.busy.lock().insert(key);
+        let session = self.session.clone();
+        let anthropic = self.anthropic.clone();
+        let strat = self.strategy;
+        let news = self.data().news;
+        let (slot, busy, status) = (self.waiver.clone(), self.busy.clone(), self.status.clone());
+        self.rt.spawn(async move {
+            match waiver::analyze(&session, &anthropic, strat, &news, 300).await {
+                Ok(r) => {
+                    *status.lock() = format!("{} waiver candidates.", r.candidates.len());
+                    *slot.lock() = Some(r);
+                }
+                Err(e) => *status.lock() = format!("waiver error: {e}"),
+            }
+            busy.lock().remove(key);
+            ctx.request_repaint();
+        });
+    }
+
+    fn spawn_trade(&self, ctx: egui::Context) {
+        let key = "trade";
+        let (partner, send_input, recv_input) = (
+            self.trade_partner.clone(),
+            self.trade_send.clone(),
+            self.trade_receive.clone(),
+        );
+        if partner.trim().is_empty() || send_input.trim().is_empty() || recv_input.trim().is_empty() {
+            *self.status.lock() = "Fill partner / send / receive.".into();
+            return;
+        }
+        self.busy.lock().insert(key);
+        let data = self.data();
+        let Some(roster) = data.roster.clone() else {
+            *self.status.lock() = "No roster yet.".into();
+            self.busy.lock().remove(key);
+            return;
+        };
+        let (others, news, strat, anthropic) = (
+            data.all_rosters.clone(),
+            data.news.clone(),
+            self.strategy,
+            self.anthropic.clone(),
+        );
+        let (slot, busy, status) = (self.trade.clone(), self.busy.clone(), self.status.clone());
+        self.rt.spawn(async move {
+            let split = |s: &str| -> Vec<String> {
+                s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
+            };
+            match trade::analyze(
+                &anthropic,
+                &roster,
+                &partner,
+                &split(&send_input),
+                &split(&recv_input),
+                &others,
+                strat,
+                &news,
+            )
+            .await
+            {
+                Ok(a) => {
+                    *status.lock() =
+                        format!("Verdict {} (net ROS {:+.1})", a.verdict, a.net_ros_delta);
+                    *slot.lock() = Some(a);
+                }
+                Err(e) => *status.lock() = format!("trade error: {e}"),
+            }
+            busy.lock().remove(key);
+            ctx.request_repaint();
+        });
+    }
+
+    fn spawn_draft(&self, ctx: egui::Context) {
+        let key = "draft";
+        self.busy.lock().insert(key);
+        let session = self.session.clone();
+        let anthropic = self.anthropic.clone();
+        let news = self.data().news;
+        let team = self.data().roster.map(|r| r.team_name).unwrap_or_default();
+        let strat = self.strategy;
+        let (slot, busy, status) = (self.draft_sugg.clone(), self.busy.clone(), self.status.clone());
+        self.rt.spawn(async move {
+            let dm = DraftManager {
+                session: &session,
+                anthropic: &anthropic,
+                strategy: strat,
+                my_team_name: team,
+            };
+            let result = async {
+                let state = dm.snapshot().await?;
+                dm.ask_claude(&state, &news).await
+            }
+            .await;
+            match result {
+                Ok(s) => {
+                    *status.lock() = format!("{} draft candidates.", s.picks.len());
+                    *slot.lock() = Some(s);
+                }
+                Err(e) => *status.lock() = format!("draft error: {e}"),
+            }
+            busy.lock().remove(key);
+            ctx.request_repaint();
+        });
+    }
+}
+
+pub fn run(
+    rt: tokio::runtime::Handle,
+    session: Arc<LeagueSession>,
+    anthropic: Anthropic,
+    scheduler: Arc<Scheduler>,
+    strategy: Strategy,
+) -> anyhow::Result<()> {
+    let app = GuiApp {
+        rt,
+        session,
+        anthropic: Arc::new(anthropic),
+        scheduler,
+        strategy,
+        tab: Tab::Roster,
+        status: Arc::new(Mutex::new("Background refresh running.".into())),
+        lineup: Arc::new(Mutex::new(None)),
+        waiver: Arc::new(Mutex::new(None)),
+        trade: Arc::new(Mutex::new(None)),
+        draft_sugg: Arc::new(Mutex::new(None)),
+        busy: Arc::new(Mutex::new(Default::default())),
+        trade_partner: String::new(),
+        trade_send: String::new(),
+        trade_receive: String::new(),
+    };
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1150.0, 740.0])
+            .with_title("sleeper-agent"),
+        ..Default::default()
+    };
+    eframe::run_native("sleeper-agent", options, Box::new(|_cc| Ok(Box::new(app))))
+        .map_err(|e| anyhow::anyhow!("eframe: {e}"))
+}

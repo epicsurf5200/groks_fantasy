@@ -1,0 +1,25 @@
+# Rust
+/target/
+Cargo.lock.bak
+**/*.rs.bk
+
+# Sensitive configuration
+/config.yaml
+*.local.yaml
+
+# Cached league data
+league_data/
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+
+# Misc
+*.log
+*.bak
+*.swp

@@ -1,0 +1,43 @@
+[package]
+name = "sleeper_agent"
+version = "0.1.0"
+edition = "2021"
+description = "sleeper-agent — an autonomous Claude-powered fantasy football manager built natively on the Sleeper API"
+license = "MIT"
+
+[lib]
+name = "sleeper_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sa"
+path = "src/main.rs"
+
+[[bin]]
+name = "sa-gui"
+path = "src/bin/gui_main.rs"
+required-features = ["gui"]
+
+[features]
+default = ["gui"]
+gui = ["dep:eframe"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "gzip"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+ratatui = "0.28"
+crossterm = "0.28"
+url = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+quick-xml = { version = "0.36", features = ["serialize"] }
+dirs = "5"
+parking_lot = "0.12"
+eframe = { version = "0.29", optional = true }
